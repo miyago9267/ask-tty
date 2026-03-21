@@ -27,7 +27,7 @@ Run in background:
 echo $(ask-tty "sudo password" --sensitive) | sudo -S <command>
 ```
 
-Then tell the user: "I need your sudo password. Type: `/tty yourpassword`"
+Then tell the user: "I need your sudo password. Type: `tty:yourpassword`"
 
 ### ssh password
 
@@ -42,7 +42,7 @@ ANSWER=$(ask-tty "Proceed with apt upgrade? (y/N)")
 echo "$ANSWER" | <command>
 ```
 
-Then tell the user: "Confirm? Type: `/tty y` or `/tty n`"
+Then tell the user: "Confirm? Type: `tty:y` or `tty:n`"
 
 ## Important
 

@@ -3,29 +3,30 @@
 # Sends input to ask-tty service, blocks message from reaching Claude
 # Password never enters Claude's context
 
-# Read stdin (JSON from Claude Code)
+# Read stdin from Claude Code
 INPUT=$(cat)
 
-# Extract user prompt
-if command -v jq &> /dev/null; then
+# Try to extract prompt from JSON, fallback to raw text
+if command -v jq &> /dev/null && echo "$INPUT" | jq -e . >/dev/null 2>&1; then
   PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 else
-  PROMPT=$(echo "$INPUT" | grep -o '"prompt":"[^"]*"' | cut -d'"' -f4)
+  # stdin is raw text, not JSON
+  PROMPT="$INPUT"
 fi
 
-# Check if prompt starts with /tty
-if [[ "$PROMPT" != /tty* ]]; then
-  # Not a /tty command — pass through
+# Check if prompt starts with tty: or res:
+if [[ "$PROMPT" == tty:* ]]; then
+  TTY_INPUT="${PROMPT#tty:}"
+elif [[ "$PROMPT" == res:* ]]; then
+  TTY_INPUT="${PROMPT#res:}"
+else
+  # Not an ask-tty response — pass through
   echo "$INPUT"
   exit 0
 fi
 
-# Extract the input (everything after "/tty ")
-TTY_INPUT="${PROMPT#/tty}"
-TTY_INPUT="${TTY_INPUT# }"  # trim leading space
-
 if [ -z "$TTY_INPUT" ]; then
-  echo "Usage: /tty <your input>" >&2
+  echo "Usage: tty:<your input>" >&2
   exit 2
 fi
 
