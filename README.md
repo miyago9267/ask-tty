@@ -46,6 +46,14 @@ Works from any Claude Code session — local, remote, or headless.
 | CLI | `ask-tty` script, calls the service | Each machine |
 | Service | HTTP server, relays prompts via Telegram | Your server |
 
+## Install (Claude Code Plugin)
+
+```bash
+claude plugin add miyago9267/ask-tty
+```
+
+This installs the **skill** only (teaches Claude to use ask-tty). You still need to set up the **service** and **CLI** below.
+
 ## Setup
 
 ### 1. Create a Telegram Bot

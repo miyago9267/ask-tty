@@ -1,0 +1,43 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ask-tty",
+  "description": "Universal stdin proxy for Claude Code — get passwords, confirmations, and interactive input via Telegram when the Bash tool can't handle stdin",
+  "owner": {
+    "name": "Miyago",
+    "email": "miyago9267@gmail.com"
+  },
+  "metadata": {
+    "description": "Bridges the gap between Claude Code's non-interactive Bash tool and commands that require stdin input"
+  },
+  "plugins": [
+    {
+      "name": "ask-tty",
+      "source": "./",
+      "description": "Teaches Claude to use ask-tty for stdin input (sudo, ssh, y/N confirmations). Includes CLI script, self-hosted Telegram relay service, and always-on skill.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Miyago",
+        "email": "miyago9267@gmail.com"
+      },
+      "homepage": "https://github.com/miyago9267/ask-tty",
+      "repository": "https://github.com/miyago9267/ask-tty",
+      "license": "MIT",
+      "keywords": [
+        "stdin",
+        "sudo",
+        "ssh",
+        "tty",
+        "telegram",
+        "interactive"
+      ],
+      "category": "workflow",
+      "tags": [
+        "stdin",
+        "security",
+        "remote",
+        "telegram"
+      ],
+      "strict": false
+    }
+  ]
+}
