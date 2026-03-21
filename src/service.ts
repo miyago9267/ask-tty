@@ -1,72 +1,77 @@
 /**
  * ask-tty service
  *
- * HTTP service that proxies stdin requests through Telegram.
- * Any Claude Code session can POST to /ask, the service sends the prompt
- * to the owner's Telegram, waits for reply, and returns it.
+ * Core HTTP service that proxies stdin requests for Claude Code's Bash tool.
+ * Provides /ask (for CLI script) and /respond (for any notification adapter).
+ *
+ * Without an adapter: use the built-in web UI at /pending to see and respond to prompts.
+ * With an adapter (Telegram, Discord, etc.): prompts are pushed to the adapter,
+ * responses come back via /respond or adapter-specific webhook.
  */
 
 import { Hono } from 'hono'
 import { serve } from 'bun'
-import { createTelegramClient, type TelegramUpdate } from './telegram'
 
 // --- Config ---
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const WEBHOOK_PORT = Number(process.env.WEBHOOK_PORT) || 3847
 const ASK_TTY_SECRET = process.env.ASK_TTY_SECRET || ''
-const OWNER_CHAT_ID = Number(process.env.OWNER_CHAT_ID) || 0
+const ADAPTER = process.env.ASK_TTY_ADAPTER || ''  // 'telegram' | '' (none)
 
-if (!BOT_TOKEN) { console.error('TELEGRAM_BOT_TOKEN required'); process.exit(1) }
 if (!ASK_TTY_SECRET) { console.error('ASK_TTY_SECRET required'); process.exit(1) }
-if (!OWNER_CHAT_ID) { console.error('OWNER_CHAT_ID required'); process.exit(1) }
 
-const telegram = createTelegramClient(BOT_TOKEN)
+// --- Ask Queue (core) ---
 
-// --- Ask Queue ---
-
-interface PendingAsk {
+export interface PendingAsk {
+  id: string
   prompt: string
   sensitive: boolean
+  createdAt: number
   resolve: (reply: string) => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
 }
 
-const askQueue: PendingAsk[] = []
+export const askQueue: PendingAsk[] = []
 
-function hasPendingAsk(): boolean {
+let idCounter = 0
+function nextId(): string {
+  return `ask-${Date.now()}-${++idCounter}`
+}
+
+export function hasPendingAsk(): boolean {
   return askQueue.length > 0
 }
 
-function sendAskPrompt(pending: PendingAsk) {
-  const prefix = pending.sensitive ? '[sensitive — message will be deleted]\n' : ''
-  telegram.sendMessage(OWNER_CHAT_ID, `${prefix}${pending.prompt}`)
+export function resolveAskById(id: string, reply: string): boolean {
+  const idx = askQueue.findIndex((p) => p.id === id)
+  if (idx < 0) return false
+  const pending = askQueue.splice(idx, 1)[0]
+  clearTimeout(pending.timer)
+  pending.resolve(reply)
+  return true
 }
 
-function resolveNextAsk(reply: string, messageId: number) {
+export function resolveNextAsk(reply: string): boolean {
   const pending = askQueue.shift()
-  if (!pending) return
-
+  if (!pending) return false
   clearTimeout(pending.timer)
-
-  if (pending.sensitive) {
-    telegram.deleteMessage(OWNER_CHAT_ID, messageId)
-  }
-
   pending.resolve(reply)
+  return true
+}
 
-  // Send next prompt if queued
-  if (askQueue.length > 0) {
-    sendAskPrompt(askQueue[0])
-  }
+// Adapter hook: called when a new ask is enqueued
+export let onNewAsk: ((ask: PendingAsk) => void) | null = null
+
+export function setOnNewAsk(handler: (ask: PendingAsk) => void) {
+  onNewAsk = handler
 }
 
 // --- HTTP Server ---
 
 const app = new Hono()
 
-// Core endpoint: receive stdin request, wait for Telegram reply
+// Core: receive stdin request from ask-tty CLI
 app.post('/ask', async (c) => {
   const body = (await c.req.json()) as {
     prompt: string
@@ -83,19 +88,23 @@ app.post('/ask', async (c) => {
     return c.json({ error: 'prompt is required' }, 400)
   }
 
-  const timeoutMs = Math.min(body.timeout || 120_000, 300_000) // max 5 min
+  const timeoutMs = Math.min(body.timeout || 120_000, 300_000)
 
   try {
     const reply = await new Promise<string>((resolve, reject) => {
+      const id = nextId()
+
       const timer = setTimeout(() => {
-        const idx = askQueue.findIndex((p) => p.resolve === resolve)
+        const idx = askQueue.findIndex((p) => p.id === id)
         if (idx >= 0) askQueue.splice(idx, 1)
         reject(new Error('Timed out waiting for input'))
       }, timeoutMs)
 
       const pending: PendingAsk = {
+        id,
         prompt: body.prompt,
         sensitive: body.sensitive ?? false,
+        createdAt: Date.now(),
         resolve,
         reject,
         timer,
@@ -103,9 +112,8 @@ app.post('/ask', async (c) => {
 
       askQueue.push(pending)
 
-      if (askQueue.length === 1) {
-        sendAskPrompt(pending)
-      }
+      // Notify adapter (if any)
+      if (onNewAsk) onNewAsk(pending)
     })
 
     return c.json({ reply })
@@ -115,57 +123,73 @@ app.post('/ask', async (c) => {
   }
 })
 
-// Telegram webhook: receive user replies
-app.post('/telegram/webhook', async (c) => {
-  const update = (await c.req.json()) as TelegramUpdate
-  const message = update.message
-  if (!message?.text || !message.from) return c.json({ ok: true })
-
-  const chatId = message.chat.id
-  const messageId = message.message_id
-
-  // Only accept from owner
-  if (chatId !== OWNER_CHAT_ID) return c.json({ ok: true })
-
-  if (hasPendingAsk()) {
-    resolveNextAsk(message.text, messageId)
+// Core: respond to a pending ask (used by adapters or web UI)
+app.post('/respond', async (c) => {
+  const body = (await c.req.json()) as {
+    secret: string
+    id?: string
+    reply: string
   }
-  // No pending ask — ignore (or extend with your own bot logic)
 
-  return c.json({ ok: true })
+  if (body.secret !== ASK_TTY_SECRET) {
+    return c.json({ error: 'unauthorized' }, 403)
+  }
+
+  let resolved: boolean
+  if (body.id) {
+    resolved = resolveAskById(body.id, body.reply)
+  } else {
+    resolved = resolveNextAsk(body.reply)
+  }
+
+  return c.json({ ok: resolved })
+})
+
+// Core: list pending asks (for web UI or debugging)
+app.get('/pending', (c) => {
+  const secret = c.req.query('secret')
+  if (secret !== ASK_TTY_SECRET) {
+    return c.json({ error: 'unauthorized' }, 403)
+  }
+
+  return c.json(
+    askQueue.map((p) => ({
+      id: p.id,
+      prompt: p.prompt,
+      sensitive: p.sensitive,
+      createdAt: p.createdAt,
+    })),
+  )
 })
 
 app.get('/health', (c) =>
   c.json({
     status: 'ok',
     service: 'ask-tty',
+    adapter: ADAPTER || 'none',
     pendingAsks: askQueue.length,
   }),
 )
 
-// Pairing helper: send a message to the bot, check server logs for your chat ID
-app.get('/whoami', (c) =>
-  c.text(
-    'Send any message to your Telegram bot, then check server logs for your chat ID.\n' +
-    'Set it as OWNER_CHAT_ID in .env.',
-  ),
-)
+// --- Adapter Loading ---
+
+async function loadAdapter() {
+  if (ADAPTER === 'telegram') {
+    const { initTelegramAdapter } = await import('./adapters/telegram')
+    initTelegramAdapter(app)
+    console.log('Telegram adapter loaded')
+  }
+  // Future: else if (ADAPTER === 'discord') { ... }
+}
 
 // --- Start ---
 
 async function main() {
+  await loadAdapter()
+
   serve({ fetch: app.fetch, port: WEBHOOK_PORT })
   console.log(`ask-tty service listening on port ${WEBHOOK_PORT}`)
-
-  const webhookUrl = process.env.WEBHOOK_URL
-  if (webhookUrl) {
-    await telegram.setWebhook(webhookUrl)
-    console.log(`Telegram webhook: ${webhookUrl}`)
-  }
-
-  const me = await telegram.getMe()
-  console.log(`Bot: @${me.username} (${me.id})`)
-  console.log(`Owner chat ID: ${OWNER_CHAT_ID}`)
+  console.log(`Adapter: ${ADAPTER || 'none (use /pending + /respond)'}`)
 }
 
 main().catch((err) => {

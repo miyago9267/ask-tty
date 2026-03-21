@@ -1,7 +1,7 @@
 {
   "name": "ask-tty",
   "version": "1.0.0",
-  "description": "Universal stdin proxy for Claude Code — get passwords, confirmations, and interactive input via Telegram when the Bash tool can't handle stdin",
+  "description": "stdin proxy for Claude Code — get passwords, confirmations, and interactive input when the Bash tool can't handle stdin",
   "author": {
     "name": "Miyago",
     "url": "https://github.com/miyago9267"
@@ -14,9 +14,9 @@
     "sudo",
     "ssh",
     "password",
-    "telegram",
     "tty",
     "interactive",
-    "proxy"
+    "proxy",
+    "bash"
   ]
 }

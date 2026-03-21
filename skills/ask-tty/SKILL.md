@@ -1,6 +1,6 @@
 ---
 name: ask-tty
-description: When stdin input is needed (sudo, ssh, y/N confirmations, etc.), use ask-tty to get input from the user via Telegram. Always active.
+description: When stdin input is needed (sudo, ssh, y/N confirmations, etc.), use ask-tty to get input from the user. Always active.
 alwaysApply: true
 ---
 
@@ -37,7 +37,7 @@ VALUE=$(ask-tty "Enter the new hostname")
 
 ## Flags
 
-- `--sensitive` / `-s`: Input will be auto-deleted from chat history (use for passwords)
+- `--sensitive` / `-s`: Input is treated as secret (adapter may auto-delete from chat history)
 - `--timeout N` / `-t N`: Timeout in seconds (default: 120)
 
 ## Rules
