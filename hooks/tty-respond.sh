@@ -1,26 +1,27 @@
 #!/bin/bash
-# UserPromptSubmit hook: intercept /tty <input>
-# Sends input to ask-tty service, blocks message from reaching Claude
-# Password never enters Claude's context
+# UserPromptSubmit hook: intercept tty: or res: prefix
+# Writes response to ~/.cache/ask-tty/response (local file IPC)
+# Rewrites prompt so password never enters Claude's context
 
-# Read stdin from Claude Code
+ASK_DIR="$HOME/.cache/ask-tty"
+
 INPUT=$(cat)
 
-# Try to extract prompt from JSON, fallback to raw text
+# Try JSON, fallback to raw text
 if command -v jq &> /dev/null && echo "$INPUT" | jq -e . >/dev/null 2>&1; then
   PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
+  IS_JSON=true
 else
-  # stdin is raw text, not JSON
   PROMPT="$INPUT"
+  IS_JSON=false
 fi
 
-# Check if prompt starts with tty: or res:
+# Check prefix
 if [[ "$PROMPT" == tty:* ]]; then
   TTY_INPUT="${PROMPT#tty:}"
 elif [[ "$PROMPT" == res:* ]]; then
   TTY_INPUT="${PROMPT#res:}"
 else
-  # Not an ask-tty response — pass through
   echo "$INPUT"
   exit 0
 fi
@@ -30,49 +31,19 @@ if [ -z "$TTY_INPUT" ]; then
   exit 2
 fi
 
-# Load config
-CONFIG_FILE="${ASK_TTY_CONFIG:-$HOME/.config/ask-tty/config}"
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "ask-tty config not found at $CONFIG_FILE" >&2
+# Check if something is waiting
+if [ ! -f "$ASK_DIR/pending" ]; then
+  echo "No pending ask-tty request." >&2
   exit 2
 fi
 
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
+# Write response to file (password stays here, never in Claude context)
+echo "$TTY_INPUT" > "$ASK_DIR/response"
 
-if [ -z "$ASK_TTY_URL" ] || [ -z "$ASK_TTY_SECRET" ]; then
-  echo "ASK_TTY_URL and ASK_TTY_SECRET required in $CONFIG_FILE" >&2
-  exit 2
-fi
-
-# Build respond URL (replace /ask with /respond)
-RESPOND_URL="${ASK_TTY_URL%/ask}/respond"
-
-# Send response to service
-if command -v jq &> /dev/null; then
-  PAYLOAD=$(jq -n --arg secret "$ASK_TTY_SECRET" --arg reply "$TTY_INPUT" '{secret: $secret, reply: $reply}')
+# Rewrite prompt to innocuous message and pass through (exit 0)
+if [ "$IS_JSON" = true ]; then
+  echo "$INPUT" | jq '.prompt = "[ask-tty] Input received. Check the background task for result."'
 else
-  ESC_INPUT=$(printf '%s' "$TTY_INPUT" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  PAYLOAD="{\"secret\":\"$ASK_TTY_SECRET\",\"reply\":\"$ESC_INPUT\"}"
+  echo "[ask-tty] Input received. Check the background task for result."
 fi
-
-RESPONSE=$(curl -s -X POST "$RESPOND_URL" \
-  -H 'Content-Type: application/json' \
-  --max-time 5 \
-  -d "$PAYLOAD")
-
-# Check result
-if command -v jq &> /dev/null; then
-  OK=$(echo "$RESPONSE" | jq -r '.ok // empty')
-else
-  OK=$(echo "$RESPONSE" | grep -o '"ok":true')
-fi
-
-if [ -n "$OK" ]; then
-  echo "Input sent." >&2
-else
-  echo "Failed to send input. Is ask-tty service running?" >&2
-fi
-
-# Exit 2 = block message from reaching Claude
-exit 2
+exit 0

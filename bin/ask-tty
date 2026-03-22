@@ -1,45 +1,23 @@
 #!/bin/bash
-# ask-tty — Universal stdin proxy for Claude Code
+# ask-tty — stdin proxy for Claude Code
+#
+# Always uses local file IPC (~/.cache/ask-tty/).
+# Optionally ALSO notifies a remote service (for Telegram push etc.)
+# Response can come from either channel — whoever replies first wins.
 #
 # Usage:
 #   ask-tty "Enter sudo password" --sensitive
-#   ask-tty "Proceed? (y/N)"
 #   echo $(ask-tty "sudo password" -s) | sudo -S <cmd>
-#
-# Config: ~/.config/ask-tty/config
-#   ASK_TTY_URL=https://your-server.com/ask
-#   ASK_TTY_SECRET=your-secret
 
-CONFIG_FILE="${ASK_TTY_CONFIG:-$HOME/.config/ask-tty/config}"
-
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "Error: config not found at $CONFIG_FILE" >&2
-  echo "" >&2
-  echo "Create it:" >&2
-  echo "  mkdir -p ~/.config/ask-tty" >&2
-  echo "  cat > ~/.config/ask-tty/config << EOF" >&2
-  echo "  ASK_TTY_URL=https://your-server.com/ask" >&2
-  echo "  ASK_TTY_SECRET=your-secret" >&2
-  echo "  EOF" >&2
-  exit 1
-fi
-
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
-
-if [ -z "$ASK_TTY_URL" ] || [ -z "$ASK_TTY_SECRET" ]; then
-  echo "Error: ASK_TTY_URL and ASK_TTY_SECRET must be set in $CONFIG_FILE" >&2
-  exit 1
-fi
-
+ASK_DIR="$HOME/.cache/ask-tty"
 PROMPT=""
 SENSITIVE=false
-TIMEOUT=120000
+TIMEOUT=120
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --sensitive|-s) SENSITIVE=true ;;
-    --timeout|-t) shift; TIMEOUT=$(( $1 * 1000 )) ;;
+    --timeout|-t) shift; TIMEOUT="$1" ;;
     *) [ -n "$PROMPT" ] && PROMPT="$PROMPT $1" || PROMPT="$1" ;;
   esac
   shift
@@ -50,47 +28,48 @@ if [ -z "$PROMPT" ]; then
   exit 1
 fi
 
-# Build JSON payload (use jq if available, fallback to manual escaping)
-if command -v jq &> /dev/null; then
-  PAYLOAD=$(jq -n \
-    --arg prompt "$PROMPT" \
-    --arg secret "$ASK_TTY_SECRET" \
-    --argjson sensitive "$SENSITIVE" \
-    --argjson timeout "$TIMEOUT" \
-    '{prompt: $prompt, secret: $secret, sensitive: $sensitive, timeout: $timeout}')
-else
-  ESC_PROMPT=$(printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g')
-  PAYLOAD="{\"prompt\":\"$ESC_PROMPT\",\"secret\":\"$ASK_TTY_SECRET\",\"sensitive\":$SENSITIVE,\"timeout\":$TIMEOUT}"
+# Kill all background jobs on exit
+trap 'kill $(jobs -p) 2>/dev/null' EXIT
+
+# --- Setup local file IPC (always) ---
+mkdir -p "$ASK_DIR"
+echo "$PROMPT" > "$ASK_DIR/pending"
+[ "$SENSITIVE" = true ] && touch "$ASK_DIR/sensitive"
+rm -f "$ASK_DIR/response"
+
+# --- Optionally notify remote service (non-blocking) ---
+CONFIG_FILE="${ASK_TTY_CONFIG:-$HOME/.config/ask-tty/config}"
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+  if [ -n "$ASK_TTY_URL" ] && [ -n "$ASK_TTY_SECRET" ]; then
+    TIMEOUT_MS=$(( TIMEOUT * 1000 ))
+    PAYLOAD=$(jq -n --arg p "$PROMPT" --arg s "$ASK_TTY_SECRET" --argjson sens "$SENSITIVE" --argjson t "$TIMEOUT_MS" '{prompt:$p,secret:$s,sensitive:$sens,timeout:$t}' 2>/dev/null)
+    if [ -n "$PAYLOAD" ]; then
+      # Fully detach so it doesn't block script exit
+      (curl -s -X POST "$ASK_TTY_URL" -H 'Content-Type: application/json' --max-time $(( TIMEOUT + 5 )) -d "$PAYLOAD" | jq -r '.reply // empty' 2>/dev/null | while read -r line; do
+        if [ -n "$line" ] && [ ! -f "$ASK_DIR/response" ]; then
+          echo "$line" > "$ASK_DIR/response"
+        fi
+      done) </dev/null >/dev/null 2>&1 &
+      disown
+    fi
+  fi
 fi
 
-RESPONSE=$(curl -s -X POST "$ASK_TTY_URL" \
-  -H 'Content-Type: application/json' \
-  --max-time $(( TIMEOUT / 1000 + 5 )) \
-  -d "$PAYLOAD")
+# --- Poll for response (from hook or remote) ---
+START=$(date +%s)
+while true; do
+  if [ -f "$ASK_DIR/response" ]; then
+    REPLY=$(cat "$ASK_DIR/response")
+    rm -f "$ASK_DIR/response" "$ASK_DIR/pending" "$ASK_DIR/sensitive"
+    printf '%s' "$REPLY"
+    exit 0
+  fi
+  NOW=$(date +%s)
+  if (( NOW - START >= TIMEOUT )); then break; fi
+  sleep 0.1
+done
 
-CURL_EXIT=$?
-if [ $CURL_EXIT -ne 0 ]; then
-  echo "Error: failed to reach ask-tty service (curl exit $CURL_EXIT)" >&2
-  exit 1
-fi
-
-# Parse response
-if command -v jq &> /dev/null; then
-  ERROR=$(echo "$RESPONSE" | jq -r '.error // empty')
-  REPLY=$(echo "$RESPONSE" | jq -r '.reply // empty')
-else
-  ERROR=$(echo "$RESPONSE" | grep -o '"error":"[^"]*"' | cut -d'"' -f4)
-  REPLY=$(echo "$RESPONSE" | grep -o '"reply":"[^"]*"' | cut -d'"' -f4)
-fi
-
-if [ -n "$ERROR" ]; then
-  echo "Error: $ERROR" >&2
-  exit 1
-fi
-
-if [ -z "$REPLY" ]; then
-  echo "Error: no reply received" >&2
-  exit 1
-fi
-
-printf '%s' "$REPLY"
+rm -f "$ASK_DIR/pending" "$ASK_DIR/sensitive"
+echo "Error: timed out ($TIMEOUT s)" >&2
+exit 1
