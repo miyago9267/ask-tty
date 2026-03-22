@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "interactive-bash": {
+      "command": "bun",
+      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/src/mcp-interactive-bash.ts"]
+    }
+  }
+}

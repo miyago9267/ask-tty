@@ -1,27 +1,33 @@
 ---
 name: ask-tty
-description: When stdin input is needed (sudo, ssh, y/N confirmations, etc.), use ask-tty to get input from the user. Always active.
+description: When stdin input is needed (sudo, ssh, y/N confirmations, etc.), use InteractiveBash or ask-tty. Always active.
 alwaysApply: true
 ---
 
-# ask-tty — stdin proxy for Claude Code
+# stdin support for Claude Code
 
-The Bash tool does not support interactive stdin. When a command requires user input (passwords, confirmations, passphrases, etc.), use `ask-tty` with `run_in_background: true`.
+The built-in Bash tool does not support stdin. Two tools solve this:
 
-The user responds by typing `res:<input>` or `tty:<input>` in the CLI. A hook intercepts this, writes the input to a file, and rewrites the prompt so the input never enters your context.
+## 1. InteractiveBash (MCP tool) — when you know the input
 
-## How it works
+Use when you already have the stdin content (e.g., piping "y" to a prompt, feeding a heredoc).
+
+```
+InteractiveBash(command: "apt install -y nginx", stdin: "y\n")
+InteractiveBash(command: "cat > /tmp/config.json", stdin: '{"key":"value"}')
+```
+
+## 2. ask-tty (CLI + hook) — when you need to ask the user
+
+Use when you need input from the user (passwords, confirmations you can't decide).
+
+### Flow
 
 1. Run the command with ask-tty using `run_in_background: true`
 2. Tell the user what input is needed and to type `res:<their input>`
-3. User types it — hook rewrites the prompt to `[ask-tty] Input received`
-4. When you see `[ask-tty] Input received`, immediately use TaskOutput to check the background task
-
-## Usage
+3. When you see the user's `res:` message, immediately use TaskOutput to check the background task
 
 ### sudo
-
-Run in background:
 
 ```bash
 echo $(~/bin/ask-tty "sudo password" --sensitive) | sudo -S <command>
@@ -35,7 +41,7 @@ Then tell the user: "Type `res:yourpassword`"
 sshpass -p "$(~/bin/ask-tty "SSH password for user@host" --sensitive)" ssh user@host <command>
 ```
 
-### y/N confirmation
+### y/N confirmation (when user must decide)
 
 ```bash
 ANSWER=$(~/bin/ask-tty "Proceed? (y/N)")
@@ -44,12 +50,21 @@ echo "$ANSWER" | <command>
 
 Then tell the user: "Type `res:y` or `res:n`"
 
-## When the user types res:
+## When to use which
 
-When you see a user message starting with `res:` or `tty:`, the hook has already delivered the input to the background ask-tty process. Immediately:
+| Scenario | Tool |
+|----------|------|
+| You know the input (y/n, config, heredoc) | InteractiveBash |
+| User must provide input (password, decision) | ask-tty |
+| sudo with password | ask-tty (password stays hidden) |
+| sudo with NOPASSWD | regular Bash tool |
 
-1. Do NOT repeat, display, or reference the content after `res:` / `tty:` — treat it as invisible
-2. Reply only: "Received." (nothing else about the content)
+## When the user types res: or tty:
+
+The hook has delivered the input to the background ask-tty process. Immediately:
+
+1. Do NOT repeat, display, or reference the content after `res:` / `tty:`
+2. Reply only: "Received."
 3. Use TaskOutput with the background task ID to check the result
 4. Report the command output to the user
 
@@ -58,8 +73,6 @@ When you see a user message starting with `res:` or `tty:`, the hook has already
 - **Always use `run_in_background: true`** for Bash tool calls containing ask-tty
 - Always use `--sensitive` for passwords
 - Always use full path `~/bin/ask-tty`
-- Tell the user clearly what to type: `res:<what>`
 - **Never repeat, echo, or reference the content after `res:` / `tty:`**
 - Never read `~/.cache/ask-tty/response` directly
-- Never log or save ask-tty output to files
 - If ask-tty fails (timeout, config missing), inform the user and do not retry
